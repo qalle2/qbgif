@@ -1,74 +1,112 @@
-DECLARE SUB lzwdecode (imgaddr%, palbits%, imgwidth%)
+DECLARE SUB lzwdecode (lzwaddr%, palbits%, imgwidth%)
 DECLARE SUB setpalette (palbits%)
+DECLARE FUNCTION getfileinfo& ()
 DEFINT A-Z
 
 ' GIF decoder. Uses SCREEN 13.
 
-CLS
-OPEN "image\wolf4.gif" FOR BINARY ACCESS READ AS #1
+' blank/blazko/doom/wolf/wolf16
+CONST file = "gif\wolf16.gif"
 
-' Header
-c$ = SPACE$(6)
-GET #1, 1, c$
-IF LEFT$(c$, 3) <> "GIF" THEN PRINT "Not a GIF file.": END
+' wolf16: 99 seconds
 
-' Logical Screen Descriptor (get GCT bit depth from packed fields byte)
-c$ = SPACE$(1)
-GET #1, 11, c$
-IF ASC(c$) AND &H80 = 0 THEN PRINT "No GCT.": END
-palbits = (ASC(c$) AND 7) + 1
+' make sure file exists (otherwise OPEN...BINARY would create it)
+ON ERROR GOTO notfound
+OPEN file FOR INPUT AS #1: CLOSE
+ON ERROR GOTO 0
 
-' Image Descriptor
+OPEN file FOR BINARY ACCESS READ AS #1
 
-imgaddr = 14 + 2 ^ palbits * 3
-c$ = SPACE$(1)
-GET #1, imgaddr, c$
-IF c$ <> "," THEN PRINT "No Image Descriptor after GCT.": END
+' validate Header, Logical Screen Descriptor, Image Descriptor;
+' get (palbits * &H10000 + lzwbits * &H1000 + imgwidth)
+temp& = getfileinfo&
+palbits = temp& \ &H10000
+lzwbits = (temp& \ &H1000) AND &HF
+imgwidth = temp& AND &HFFF
 
-c$ = SPACE$(2)
-GET #1, imgaddr + 5, c$
-imgwidth = CVI(c$)
-IF imgwidth = 0 OR imgwidth > 320 THEN PRINT "Invalid width.": END
-
-c$ = SPACE$(2)
-GET #1, imgaddr + 7, c$
-imgheight = CVI(c$)
-IF imgwidth = 0 OR imgheight > 200 THEN PRINT "Invalid height.": END
-
-c$ = SPACE$(1)
-GET #1, imgaddr + 9, c$
-IF ASC(c$) AND &H80 THEN PRINT "LCT not supported.": END
-IF ASC(c$) AND &H40 THEN PRINT "Interlace not supported.": END
-
-c$ = SPACE$(1)
-GET #1, imgaddr + 10, c$
-lzwbits = ASC(c$)
-IF lzwbits < 2 OR lzwbits > 8 THEN PRINT "Invalid LZW bit depth.": END
+PRINT
+PRINT "Esc to quit, any other key to draw"
+PRINT
+PRINT "(During drawing, press Esc to quit)"
+k$ = INPUT$(1)
+IF k$ = CHR$(27) THEN END
 
 SCREEN 13
+CALL setpalette(palbits)
+starttime! = TIMER
+CALL lzwdecode(14 + 2 ^ palbits * 3 + 11, lzwbits, imgwidth)
+CLOSE
+
+decodetime! = TIMER - starttime!
+k$ = INPUT$(1)
+
+SCREEN 0
+WIDTH 80
+PRINT "Decoded in"; (decodetime! * 10) \ 10; "seconds."
+END
+
+notfound:
+PRINT "File not found. (Edit the 'file' constant at the beginning.)"
+END
+
+FUNCTION getfileinfo&
+' Validate Header, Logical Screen Descriptor and Image Descriptor.
+' Exit on error. Otherwise return:
+'     palette_bit_depth (1...8)   * &H10000
+'     + lzw_bit_depth   (2...8)   * &H1000
+'     + image_width     (1...320)
+
+' Header (6 bytes) and Logical Screen Descriptor (7 bytes)
+headlsd$ = SPACE$(13)
+GET #1, 1, headlsd$
+IF LEFT$(headlsd$, 3) <> "GIF" THEN PRINT "Not a GIF file.": END
+ver$ = MID$(headlsd$, 4, 3)
+IF ver$ <> "87a" AND ver$ <> "89a" THEN PRINT "Warning: unknown GIF version"
+' get Global Color Table bit depth (1...8) from packed fields byte
+packedfields = ASC(MID$(headlsd$, 11, 1))
+IF packedfields AND &H80 = 0 THEN
+    PRINT "Files without Global Color Table are not supported.": END
+END IF
+palbits = (packedfields AND 7) + 1
+
+' Image Descriptor (10 bytes) and palette bit depth in LZW encoding (1 byte)
+imgaddr = 14 + 2 ^ palbits * 3
+imgdesc$ = SPACE$(11)
+GET #1, imgaddr, imgdesc$
+IF LEFT$(imgdesc$, 1) <> "," THEN
+    PRINT "Images without an Image Descriptor immediately after ";
+    PRINT "Global Color Table are not supported.": END
+END IF
+imgwidth = CVI(MID$(imgdesc$, 6, 2))
+imgheight = CVI(MID$(imgdesc$, 8, 2))
+packedfields = ASC(MID$(imgdesc$, 10, 1))
+lzwbits = ASC(MID$(imgdesc$, 11, 1))
+IF lzwbits < 2 OR lzwbits > 11 THEN PRINT "Invalid LZW bit depth.": END
+
+CLS
 PRINT "Width            :"; imgwidth
 PRINT "Height           :"; imgheight
 PRINT "Palette bit depth:"; palbits
 PRINT "LZW     bit depth:"; lzwbits
-PRINT
-PRINT "Esc to quit, any other key to draw"
-k$ = INPUT$(1)
-IF k$ = CHR$(27) THEN END
 
-CLS
-CALL setpalette(palbits)
-CALL lzwdecode(imgaddr + 11, lzwbits, imgwidth)
-CLOSE
+IF imgwidth < 1 OR imgwidth > 320 THEN PRINT "Unsupported width.": END
+IF imgheight < 1 OR imgheight > 200 THEN PRINT "Unsupported height.": END
+IF lzwbits > 8 THEN PRINT "Unsupported LZW bit depth.": END
+IF packedfields AND &H80 THEN PRINT "Local Color Table not supported.": END
+IF packedfields AND &H40 THEN PRINT "Interlace not supported.": END
 
-k$ = INPUT$(1)
+getfileinfo& = palbits * &H10000 + lzwbits * &H1000& + imgwidth
 
-SUB lzwdecode (imgaddr, palbits, imgwidth)
+END FUNCTION
+
+SUB lzwdecode (lzwaddr, palbits, imgwidth)
 ' Decode and draw LZW-encoded image data.
 ' TODO: better error handling (EOF etc.)
-' imgaddr: LZW data start, palbits: bit depth, imgwidth: width
+' lzwaddr: LZW data start, palbits: bit depth, imgwidth: width
 
 ' read LZW data from subblocks
-p = imgaddr  ' byte position in file
+' TODO: 'out of string space' with large images
+p = lzwaddr  ' byte position in file
 lzw$ = ""  ' LZW data
 DO
     ' subblock size
@@ -97,17 +135,19 @@ NEXT
 clearcode = pow2(palbits)    ' LZW clear code
 endcode = pow2(palbits) + 1  ' LZW end code
 
-p = 1                  ' byte index being read in LZW data
-b = 0                  ' number of bits read from byte
-codelen = palbits + 1  ' current length of LZW codes (3...12)
-prevcode = -1          ' nonnegative=dict entry, -1 = not dict entry
+p = 1                        ' byte index being read in LZW data
+b = 0                        ' number of bits read from byte
+codelen = palbits + 1        ' current length of LZW codes (3...12)
+maxdictsize = pow2(codelen)  ' for current codelen
+prevcode = -1                ' nonnegative=dict entry, -1 = not dict entry
 
 DIM dictrefs(4095)   ' reference to another entry
 DIM dictbytes(4095)  ' final byte
 dictsize = 0
 
-' dict entry is reconstructed here before drawing (you may need to increase)
-DIM entrypixels(999)
+' dict entry is reconstructed here before drawing
+' this size should be enough for even a one-color 320*200 image
+DIM entrypixels(356)
 
 DO
     ' read next code from remaining data
@@ -135,6 +175,7 @@ DO
             dictbytes(i) = i AND &HFF  ' doesn't matter for clear/end code
         NEXT
         codelen = palbits + 1
+        maxdictsize = pow2(codelen)
         prevcode = -1
     ELSEIF code = endcode THEN
         EXIT DO
@@ -163,8 +204,9 @@ DO
             prevcode = code
         END IF
 
-        IF dictsize = pow2(codelen) AND codelen < 12 THEN
+        IF dictsize = maxdictsize AND codelen < 12 THEN
             codelen = codelen + 1
+            maxdictsize = pow2(codelen)
         END IF
 
         ' get pixels of entry by traversing dictionary
@@ -175,6 +217,7 @@ DO
             entrylen = entrylen + 1
         WEND
         ' draw entry in reverse
+        ' almost all the time is spent here
         FOR i = entrylen - 1 TO 0 STEP -1
             PSET (pixx, pixy), entrypixels(i)
             pixx = pixx + 1
