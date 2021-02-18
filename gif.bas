@@ -6,9 +6,7 @@ DEFINT A-Z
 ' GIF decoder. Uses SCREEN 13.
 
 ' blank/blazko/doom/wolf/wolf16
-CONST file = "gif\wolf16.gif"
-
-' wolf16: 99 seconds
+CONST file = "gif\doom.gif"
 
 ' make sure file exists (otherwise OPEN...BINARY would create it)
 ON ERROR GOTO notfound
@@ -104,28 +102,6 @@ SUB lzwdecode (lzwaddr, palbits, imgwidth)
 ' TODO: better error handling (EOF etc.)
 ' lzwaddr: LZW data start, palbits: bit depth, imgwidth: width
 
-' read LZW data from subblocks
-' TODO: 'out of string space' with large images
-p = lzwaddr  ' byte position in file
-lzw$ = ""  ' LZW data
-DO
-    ' subblock size
-    c$ = SPACE$(1)
-    GET #1, p, c$
-    p = p + 1
-    ' data
-    sbsize = ASC(c$)
-    IF sbsize = 0 THEN EXIT DO
-    c$ = SPACE$(sbsize)
-    GET #1, p, c$
-    lzw$ = lzw$ + c$
-    p = p + sbsize
-LOOP
-
-' Trailer must follow
-GET #1, p, c$
-IF c$ <> ";" THEN PRINT "Missing trailer.": END
-
 ' powers of two
 DIM pow2(16)
 FOR i = 0 TO 12
@@ -135,7 +111,9 @@ NEXT
 clearcode = pow2(palbits)    ' LZW clear code
 endcode = pow2(palbits) + 1  ' LZW end code
 
-p = 1                        ' byte index being read in LZW data
+filepos& = lzwaddr           ' byte position in file
+lzw$ = ""                    ' ca. one block of LZW data
+p = 1                        ' byte index in lzw$
 b = 0                        ' number of bits read from byte
 codelen = palbits + 1        ' current length of LZW codes (3...12)
 maxdictsize = pow2(codelen)  ' for current codelen
@@ -149,7 +127,28 @@ dictsize = 0
 ' this size should be enough for even a one-color 320*200 image
 DIM entrypixels(356)
 
+
 DO
+    ' discard used LZW data if any
+    IF p > 1 THEN
+        lzw$ = MID$(lzw$, p)
+        p = 1
+    END IF
+
+    ' read next subblock if necessary
+    WHILE LEN(lzw$) < 4
+        ' get subblock size
+        c$ = SPACE$(1)
+        GET #1, filepos&, c$
+        filepos& = filepos& + 1
+        sbsize = ASC(c$)
+        ' read subblock
+        c$ = SPACE$(sbsize)
+        GET #1, filepos&, c$
+        lzw$ = lzw$ + c$
+        filepos& = filepos& + sbsize
+    WEND
+
     ' read next code from remaining data
     ' combine 1...3 bytes in reverse order, e.g. 0xab 0xcd -> 0xcdab
     codelng& = ASC(MID$(lzw$, p, 1))
