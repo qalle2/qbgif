@@ -5,8 +5,8 @@ DEFINT A-Z
 
 ' GIF decoder. Uses SCREEN 13.
 
-' blank/blazko/doom/wolf/wolf16
-CONST file = "gif\doom.gif"
+' blank/blazko/doom/doom16/keen/wolf/wolf16
+CONST file = "gif\keen.gif"
 
 ' make sure file exists (otherwise OPEN...BINARY would create it)
 ON ERROR GOTO notfound
@@ -23,11 +23,9 @@ lzwbits = (temp& \ &H1000) AND &HF
 imgwidth = temp& AND &HFFF
 
 PRINT
-PRINT "Esc to quit, any other key to draw"
-PRINT
-PRINT "(During drawing, press Esc to quit)"
-k$ = INPUT$(1)
-IF k$ = CHR$(27) THEN END
+PRINT "Press Esc to quit, any other key to draw."
+PRINT "(During or after drawing, press Esc to quit.)"
+k$ = INPUT$(1): IF k$ = CHR$(27) THEN END
 
 SCREEN 13
 CALL setpalette(palbits)
@@ -35,12 +33,12 @@ starttime! = TIMER
 CALL lzwdecode(14 + 2 ^ palbits * 3 + 11, lzwbits, imgwidth)
 CLOSE
 
-decodetime! = TIMER - starttime!
-k$ = INPUT$(1)
+decodetime = TIMER - starttime!
+DO: k$ = INPUT$(1): LOOP UNTIL k$ = CHR$(27)
 
 SCREEN 0
 WIDTH 80
-PRINT "Decoded in"; (decodetime! * 10) \ 10; "seconds."
+PRINT "Decoded in"; decodetime; "seconds."
 END
 
 notfound:
@@ -81,6 +79,8 @@ packedfields = ASC(MID$(imgdesc$, 10, 1))
 lzwbits = ASC(MID$(imgdesc$, 11, 1))
 IF lzwbits < 2 OR lzwbits > 11 THEN PRINT "Invalid LZW bit depth.": END
 
+IF EOF(1) THEN PRINT "Unexpected EOF.": END
+
 CLS
 PRINT "Width            :"; imgwidth
 PRINT "Height           :"; imgheight
@@ -99,55 +99,49 @@ END FUNCTION
 
 SUB lzwdecode (lzwaddr, palbits, imgwidth)
 ' Decode and draw LZW-encoded image data.
-' TODO: better error handling (EOF etc.)
 ' lzwaddr: LZW data start, palbits: bit depth, imgwidth: width
 
-' powers of two
-DIM pow2(16)
-FOR i = 0 TO 12
-    pow2(i) = 2 ^ i
-NEXT
+DIM pow2(12)          ' powers of two (faster than using the "^" operator)
+DIM dictrefs(4095)    ' LZW dictionary - reference to another entry
+DIM dictbytes(4095)   ' LZW dictionary - final byte
+DIM entrypixels(356)  ' reconstructed LZW dictionary entry
 
-clearcode = pow2(palbits)    ' LZW clear code
-endcode = pow2(palbits) + 1  ' LZW end code
+' constants
+FOR i = 0 TO 12: pow2(i) = 2 ^ i: NEXT
+clearcode = pow2(palbits)    ' LZW code: reset dictionary
+endcode = pow2(palbits) + 1  ' LZW code: stop decoding
 
 filepos& = lzwaddr           ' byte position in file
-lzw$ = ""                    ' ca. one block of LZW data
+lzw$ = ""                    ' ca. one subblock of LZW data
 p = 1                        ' byte index in lzw$
-b = 0                        ' number of bits read from byte
+b = 0                        ' number of bits read from byte (0...7)
 codelen = palbits + 1        ' current length of LZW codes (3...12)
-maxdictsize = pow2(codelen)  ' for current codelen
-prevcode = -1                ' nonnegative=dict entry, -1 = not dict entry
-
-DIM dictrefs(4095)   ' reference to another entry
-DIM dictbytes(4095)  ' final byte
-dictsize = 0
-
-' dict entry is reconstructed here before drawing
-' this size should be enough for even a one-color 320*200 image
-DIM entrypixels(356)
-
+maxdictsize = pow2(codelen)  ' max LZW dict size for current codelen
+andmask = pow2(codelen) - 1  ' LZW code AND mask for current codelen
+prevcode = -1                ' nonnegative=dict entry, -1=not dict entry
+dictsize = 0                 ' number of entries in LZW dictionary
 
 DO
-    ' discard used LZW data if any
-    IF p > 1 THEN
+    IF p > LEN(lzw$) - 2 THEN
+        ' possibly not enough data left for next LZW code
+        ' discard used LZW data
         lzw$ = MID$(lzw$, p)
         p = 1
+        ' read subblocks until there's enough data
+        ' TODO: check for unexpected EOF or end of LZW subblocks
+        WHILE LEN(lzw$) < 3
+            ' get subblock size
+            c$ = SPACE$(1)
+            GET #1, filepos&, c$
+            filepos& = filepos& + 1
+            sbsize = ASC(c$)
+            ' read subblock
+            c$ = SPACE$(sbsize)
+            GET #1, filepos&, c$
+            lzw$ = lzw$ + c$
+            filepos& = filepos& + sbsize
+        WEND
     END IF
-
-    ' read next subblock if necessary
-    WHILE LEN(lzw$) < 4
-        ' get subblock size
-        c$ = SPACE$(1)
-        GET #1, filepos&, c$
-        filepos& = filepos& + 1
-        sbsize = ASC(c$)
-        ' read subblock
-        c$ = SPACE$(sbsize)
-        GET #1, filepos&, c$
-        lzw$ = lzw$ + c$
-        filepos& = filepos& + sbsize
-    WEND
 
     ' read next code from remaining data
     ' combine 1...3 bytes in reverse order, e.g. 0xab 0xcd -> 0xcdab
@@ -158,8 +152,8 @@ DO
             codelng& = codelng& OR ASC(MID$(lzw$, p + 2, 1)) * &H10000
         END IF
     END IF
-    codelng& = codelng& \ pow2(b)           ' delete bits from end
-    code = codelng& AND (pow2(codelen) - 1) ' delete bits from start
+    ' delete unnecessary bits from start and end
+    code = codelng& \ pow2(b) AND andmask
 
     ' advance in data
     b = b + codelen
@@ -175,6 +169,7 @@ DO
         NEXT
         codelen = palbits + 1
         maxdictsize = pow2(codelen)
+        andmask = pow2(codelen) - 1
         prevcode = -1
     ELSEIF code = endcode THEN
         EXIT DO
@@ -206,6 +201,7 @@ DO
         IF dictsize = maxdictsize AND codelen < 12 THEN
             codelen = codelen + 1
             maxdictsize = pow2(codelen)
+            andmask = pow2(codelen) - 1
         END IF
 
         ' get pixels of entry by traversing dictionary
@@ -216,15 +212,15 @@ DO
             entrylen = entrylen + 1
         WEND
         ' draw entry in reverse
-        ' almost all the time is spent here
         FOR i = entrylen - 1 TO 0 STEP -1
+            ' this PSET takes almost all the time in this sub
             PSET (pixx, pixy), entrypixels(i)
             pixx = pixx + 1
             IF pixx = imgwidth THEN pixx = 0: pixy = pixy + 1
         NEXT
     END IF
 
-    IF INKEY$ = CHR$(27) THEN EXIT DO
+    IF INKEY$ = CHR$(27) THEN SCREEN 0: WIDTH 80: END
 LOOP
 
 END SUB
@@ -246,6 +242,8 @@ FOR i = 0 TO 2 ^ palbits - 1
     PALETTE i, CVL(c$ + CHR$(0)) \ 4 AND &H3F3F3F
     p = p + 3
 NEXT
+
+IF EOF(1) THEN SCREEN 0: WIDTH 80: PRINT "Unexpected EOF.": END
 
 END SUB
 
